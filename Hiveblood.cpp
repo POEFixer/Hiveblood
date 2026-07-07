@@ -2,28 +2,19 @@
 //
 // Hiveblood tracker plugin (SDK v6).
 //
-// Reads the Hiveblood total (PoE2 0.5 Breach / Genesis Tree resource) directly
-// from game memory via a fixed pointer chain and shows it as a small overlay,
-// plus how much was gained on the current map. Unlike the community GameHelper2
-// "Hiveblood" plugin (which scrapes the Genesis Tree UI text + Breach popups),
-// this reads the live value straight from memory.
+// Reads the Hiveblood total (PoE2 0.5 Breach / Genesis Tree resource) via the
+// host SDK (ctx->Game.GetHiveblood) and shows it as a small overlay, plus how
+// much was gained on the current map. The host resolves a pattern-anchored
+// pointer chain and returns the live value; this plugin only displays it. Unlike
+// the community GameHelper2 "Hiveblood" plugin (which scrapes the Genesis Tree UI
+// text + Breach popups), the read is straight from memory.
 //
-// Pointer chain (validated against PoE2 0.5.3; re-resolved to the field across a
-// relog AND a full client restart, so every offset is structural):
-//   root  = PathOfExile.exe + 0x4511468            (== "Game States" static - 0x10)
-//   cur   = [root]
-//   cur   = [cur + 0x1C8] -> [+0x60] -> [+0xD0] -> [+0x8] -> [+0x148]
-//   total = int32 at [cur + 0x688]
-//
-// SCOPE / caching: this chain lands in a Breach/Genesis controller copy that is
-// correct exactly where Hiveblood CHANGES -- at the Genesis Tree (on spend) and
-// on maps (on Breach gain) -- but reads 0 in idle areas like a hideout (the
-// controller is not populated there). Since the total cannot change in those
-// areas, the plugin caches the last good reading and shows it where the live
-// read is 0. The cached value is therefore always correct; an always-resident
-// account copy exists (confirmed in memory) but has no unique anchor and would
-// need a much larger pointer-scan to pin, with no functional benefit over the
-// cache.
+// SCOPE / caching: the host chain lands in a Breach/Genesis controller copy that
+// is correct exactly where Hiveblood CHANGES -- at the Genesis Tree (on spend)
+// and on maps (on Breach gain) -- but returns 0/false in idle areas like a
+// hideout (the controller is not populated there). Since the total cannot change
+// in those areas, the plugin caches the last good reading and shows it where the
+// live read is 0. The cached value is therefore always correct.
 //
 // PLUGIN_EXPORTS is set in the vcxproj; PluginSDK.h then emits the
 // PluginSDK_AttachHost export and makes PLUGIN_API = __declspec(dllexport).
@@ -40,17 +31,6 @@
 #include <string>
 
 namespace {
-
-// Module-relative root of the Hiveblood pointer chain (PoE2 0.5.3 build). Equals
-// the "Game States" pattern target minus 0x10; both roots are tried.
-constexpr uintptr_t kHivebloodChainRva = 0x4511468;
-constexpr uintptr_t kDerefOffsets[]    = {0x1C8, 0x60, 0xD0, 0x8, 0x148};
-constexpr uintptr_t kFieldOffset       = 0x688;
-constexpr int32_t   kHivebloodCap      = 100000;
-
-inline bool IsUserPointer(uint64_t p) {
-    return p >= 0x10000 && p < 0x7FFFFFFFFFFFull;
-}
 
 // "10344" -> "10,344".
 std::string FormatThousands(int32_t n) {
@@ -114,7 +94,7 @@ public:
 
         // Reset the per-map baseline on every area transition so the gain line
         // counts what was earned on THIS map, not the whole total.
-        const uint32_t area = ReadAreaCounter();
+        const uint64_t area = ReadAreaCounter();
         if (area != m_lastArea) { m_lastArea = area; m_hasBaseline = false; }
 
         // Live read where the chain is populated (tree / maps); otherwise fall
@@ -175,49 +155,22 @@ private:
         dl->AddText(font, size, pos, text, s);
     }
 
-    // Area-transition counter (uint32). Cached after first resolve; the global's
-    // address is static for the process lifetime.
-    uint32_t ReadAreaCounter() {
-        if (!m_areaCounterAddr)
-            m_areaCounterAddr = ctx()->Memory.GetPatternAddress("AreaChangeCounter");
-        uint32_t c = 0;
-        if (m_areaCounterAddr) ctx()->Memory.Read(m_areaCounterAddr, &c, sizeof(c));
-        return c;
-    }
+    // Area-transition counter; bumps on every area load. Forwarded from the host
+    // snapshot (no raw global read needed).
+    uint64_t ReadAreaCounter() { return ctx()->Game.GetAreaChangeCounter(); }
 
-    // Resolve the pointer chain and read the Hiveblood total. Returns false if
-    // any link faults (host RPM is SEH-guarded and returns false) or the value
-    // is outside the valid range -- a chain broken by a game patch yields
-    // garbage, which we refuse to display.
-    bool ReadHiveblood(int32_t& out) const {
-        const auto* c = ctx();
-        auto walk = [&](uintptr_t root) -> bool {
-            if (!root) return false;
-            uint64_t cur = 0;
-            if (!c->Memory.Read(root, &cur, sizeof(cur)) || !IsUserPointer(cur)) return false;
-            for (uintptr_t off : kDerefOffsets) {
-                if (!c->Memory.Read(cur + off, &cur, sizeof(cur)) || !IsUserPointer(cur)) return false;
-            }
-            int32_t v = 0;
-            if (!c->Memory.Read(cur + kFieldOffset, &v, sizeof(v))) return false;
-            if (v < 0 || v > kHivebloodCap) return false;
-            out = v;
-            return true;
-        };
-        const uintptr_t base = c->Memory.GetBaseAddress();
-        if (base && walk(base + kHivebloodChainRva)) return true;
-        const uintptr_t gs = c->Memory.GetPatternAddress("Game States");
-        if (gs && walk(gs - 0x10)) return true;
-        return false;
-    }
+    // Read the Hiveblood total via the host SDK. Returns false when not in game,
+    // the host chain is broken, or the host predates the accessor (out untouched
+    // on false). The host applies the same [0, cap] validation the plugin used to
+    // do inline; the returned value is identical to the old in-plugin chain walk.
+    bool ReadHiveblood(int32_t& out) const { return ctx()->Game.GetHiveblood(out); }
 
     HivebloodSettings m_s;
-    uint32_t  m_lastArea        = 0xFFFFFFFFu;  // sentinel: first frame triggers a reset
-    int32_t   m_baseline        = 0;            // total on entering the current map
-    bool      m_hasBaseline     = false;
-    int32_t   m_cachedTotal     = 0;            // last good reading (shown where chain reads 0)
-    bool      m_hasCached       = false;
-    uintptr_t m_areaCounterAddr = 0;            // cached AreaChangeCounter address
+    uint64_t  m_lastArea    = 0xFFFFFFFFFFFFFFFFull;  // sentinel: first frame triggers a reset
+    int32_t   m_baseline    = 0;                      // total on entering the current map
+    bool      m_hasBaseline = false;
+    int32_t   m_cachedTotal = 0;                      // last good reading (shown where live read is 0)
+    bool      m_hasCached   = false;
 };
 
 // ----------------------------------------------------------------------------
