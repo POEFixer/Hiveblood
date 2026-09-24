@@ -19,7 +19,7 @@
 // PLUGIN_EXPORTS is set in the vcxproj; PluginSDK.h then emits the
 // PluginSDK_AttachHost export and makes PLUGIN_API = __declspec(dllexport).
 
-#include "sdk/PluginSDK.h"
+#include "../../../POEFixer/plugin_sdk/PluginSDK.h"
 
 #include "HivebloodSettings.h"
 
