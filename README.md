@@ -1,3 +1,5 @@
+> **Retired (2026-10-22).** This plugin is no longer maintained or distributed by POE2Fixer. It does not load in POE2Fixer 364 and newer. Install current plugins from POE2Fixer -> Plugins -> Plugin Manager.
+
 # Hiveblood — POE2Fixer Plugin
 
 Shows your **Hiveblood** total (Path of Exile 2 0.5 Breach / Genesis Tree
